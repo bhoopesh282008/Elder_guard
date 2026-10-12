@@ -1,4 +1,4 @@
-import api from './api';
+import api, { API_BASE_URL } from './api';
 import tabStorage from '../utils/tabStorage';
 
 export const connectedPortalService = {
@@ -85,7 +85,7 @@ export const connectedPortalService = {
 
 export function elderRoomUrl(elderId) {
   const token = tabStorage.getItem('elderguard_access_token');
-  const base = 'ws://127.0.0.1:8000';
+  const base = (API_BASE_URL || window.location.origin).replace(/^http/, 'ws');
   return `${base}/ws/elder/${elderId}${token ? `?token=${encodeURIComponent(token)}` : ''}`;
 }
 

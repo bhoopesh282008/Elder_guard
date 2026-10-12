@@ -1,6 +1,9 @@
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from pathlib import Path
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.auth.routes import router as auth_router
 from app.profiles.elder import router as elder_profile_router
@@ -27,6 +30,8 @@ from app.medicines.scheduler import start_scheduler, shutdown_scheduler
 from app.emergency.scheduler import start_emergency_scheduler, shutdown_emergency_scheduler
 from app.appointments.scheduler import start_appointments_scheduler, shutdown_appointments_scheduler
 from app.vitals.scheduler import start_vitals_scheduler, shutdown_vitals_scheduler
+
+FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
 @asynccontextmanager
@@ -96,15 +101,24 @@ app.include_router(connected_ws_router)
 
 
 @app.get("/")
-def health_check():
+def health_check(request: Request):
     """
     Health check route returning app status.
+    Browsers get the built frontend instead when it exists.
     """
+    if FRONTEND_DIST.is_dir() and "text/html" in request.headers.get("accept", ""):
+        return FileResponse(FRONTEND_DIST / "index.html")
     return {
         "status": "ok",
         "app": "ElderGuard AI Backend API",
         "version": "1.0.0"
     }
+
+
+# Serve the built frontend (frontend/dist) from this service when present.
+# Mounted last so every API route above takes priority.
+if FRONTEND_DIST.is_dir():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIST), name="frontend")
 
 
 if __name__ == "__main__":
