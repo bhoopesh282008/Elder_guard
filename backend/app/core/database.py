@@ -97,6 +97,8 @@ if LOCAL_POSTGRES_URL:
                 elder_columns = {row[1] for row in conn.execute(text("PRAGMA table_info(elder_profiles)"))}
                 if "elder_id" not in elder_columns:
                     conn.execute(text("ALTER TABLE elder_profiles ADD COLUMN elder_id TEXT"))
+                if "primary_hospital_id" not in elder_columns:
+                    conn.execute(text("ALTER TABLE elder_profiles ADD COLUMN primary_hospital_id TEXT"))
                 for (user_id,) in conn.execute(text("SELECT user_id FROM elder_profiles WHERE elder_id IS NULL")):
                     conn.execute(
                         text("UPDATE elder_profiles SET elder_id = :elder_id WHERE user_id = :user_id"),
