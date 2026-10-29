@@ -2,6 +2,8 @@
 
 A connected elder-care platform that links seniors, family caregivers, doctors, hospitals, and pharmacies in one place. A FastAPI backend and a React/Vite frontend share a single data layer, so a medicine a caregiver adds, a dose an elder marks taken, or an SOS alert shows up on the other side in real time.
 
+**Live demo:** https://elderguard-nmn9.onrender.com (free tier, so the first load after idle can take up to a minute; data resets on restart). Sign in with the [demo accounts](#local-run) below.
+
 ## Features
 
 - **1-tap SOS with escalation** - elders trigger an alert from the dashboard; linked caregivers are notified first and unacknowledged alerts escalate to the hospital desk.
