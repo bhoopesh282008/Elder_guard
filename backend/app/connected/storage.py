@@ -1,4 +1,6 @@
 import json
+import logging
+import threading
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Iterable, List, Optional
@@ -469,9 +471,51 @@ def audit(elder_id: str, performed_by: str, action: str, resource_type: str, res
     )
 
 
+logger = logging.getLogger("elderguard.connected")
+
+# Alert types worth a phone buzz; the rest stay in-app only.
+TELEGRAM_ALERT_TYPES = {"sos_triggered", "medicine_taken", "medicine_reminder"}
+
+
+def _person_name(user_id: Optional[str]) -> str:
+    if not user_id:
+        return "Your elder"
+    row = fetch_one("SELECT name FROM elder_profiles WHERE user_id = :id", {"id": user_id})
+    return (row or {}).get("name") or "Your elder"
+
+
+def telegram_alert_text(type_: str, payload: Dict[str, Any]) -> Optional[str]:
+    if type_ == "sos_triggered":
+        text = f"🚨 SOS from {_person_name(payload.get('elder_id'))}. They pressed the emergency button."
+        loc = payload.get("location") or {}
+        if isinstance(loc, dict) and loc.get("lat") is not None and loc.get("lng") is not None:
+            text += f"\nLocation: https://maps.google.com/?q={loc['lat']},{loc['lng']}"
+        return text
+    if type_ == "medicine_taken":
+        return f"💊 {_person_name(payload.get('elder_id'))} marked a medicine as taken."
+    if type_ == "medicine_reminder":
+        return f"⏰ Medicine reminder for {_person_name(payload.get('elder_id'))}."
+    return None
+
+
+def _push_telegram(user_ids: List[str], type_: str, payload: Dict[str, Any]) -> None:
+    # Imported here so the connected module never fails to load if the notification package changes.
+    from app.notifications.channels.telegram import get_active_telegram_link, send_telegram_message
+    try:
+        text = telegram_alert_text(type_, payload)
+        if not text:
+            return
+        for user_id in user_ids:
+            if get_active_telegram_link(user_id):
+                send_telegram_message(user_id, text, parse_mode=None)
+    except Exception:
+        logger.exception("Telegram alert failed for %s", type_)
+
+
 def notify(user_ids: Iterable[str], type_: str, payload: Dict[str, Any]) -> None:
     created_at = now_iso()
-    for user_id in set(user_ids):
+    recipients = list(set(user_ids))
+    for user_id in recipients:
         execute(
             """
             INSERT INTO connected_notifications (id, user_id, type, payload, read, created_at)
@@ -479,6 +523,9 @@ def notify(user_ids: Iterable[str], type_: str, payload: Dict[str, Any]) -> None
             """,
             {"id": new_id(), "user_id": user_id, "type": type_, "payload": dumps(payload), "created_at": created_at},
         )
+    if recipients and type_ in TELEGRAM_ALERT_TYPES:
+        # Network call to Telegram must never slow down or fail the API request.
+        threading.Thread(target=_push_telegram, args=(recipients, type_, payload), daemon=True).start()
 
 
 def linked_caregiver_ids(elder_id: str) -> List[str]:

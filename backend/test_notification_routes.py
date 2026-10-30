@@ -56,7 +56,8 @@ r_tg_url = client.get("/notifications/telegram/link-url", headers=headers)
 print("Telegram Link URL Status:", r_tg_url.status_code)
 print("Telegram Link URL JSON:", r_tg_url.json())
 assert r_tg_url.status_code == 200
-assert user_id in r_tg_url.json()["url"]
+link_code = r_tg_url.json()["url"].split("?start=")[1]
+assert link_code != user_id  # one-time code, never the raw user id
 
 # 8. POST /notifications/telegram/webhook
 webhook_payload = {
@@ -64,7 +65,7 @@ webhook_payload = {
     "message": {
         "message_id": 1,
         "chat": {"id": 987654321, "username": "tg_elder_user"},
-        "text": f"/start {user_id}"
+        "text": f"/start {link_code}"
     }
 }
 r_webhook = client.post("/notifications/telegram/webhook", json=webhook_payload)

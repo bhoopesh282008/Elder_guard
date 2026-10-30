@@ -1,3 +1,6 @@
+import logging
+import os
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, Request
@@ -34,6 +37,21 @@ from app.vitals.scheduler import start_vitals_scheduler, shutdown_vitals_schedul
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
+def _register_telegram_webhook() -> None:
+    """On Render (RENDER_EXTERNAL_URL is set) point the bot at this deployment; never blocks or fails startup."""
+    base_url = os.getenv("RENDER_EXTERNAL_URL")
+    if not base_url:
+        return
+
+    def run() -> None:
+        from app.notifications.channels.telegram import register_webhook
+        result = register_webhook(base_url)
+        if result.get("reason") != "no_token":
+            logging.getLogger("elderguard").info("Telegram webhook: %s", result)
+
+    threading.Thread(target=run, daemon=True).start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     initialize_connected_schema()
@@ -44,6 +62,7 @@ async def lifespan(app: FastAPI):
     start_emergency_scheduler()
     start_appointments_scheduler()
     start_vitals_scheduler()
+    _register_telegram_webhook()
     yield
     # Shutdown: stop background schedulers
     shutdown_scheduler()

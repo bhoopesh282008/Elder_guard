@@ -37,6 +37,7 @@ GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
 FIREBASE_CREDENTIALS_JSON: str = os.getenv("FIREBASE_CREDENTIALS_JSON", "")
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_BOT_USERNAME: str = os.getenv("TELEGRAM_BOT_USERNAME", "ElderGuardAIBot")
+TELEGRAM_WEBHOOK_SECRET: str = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 
 # Vitals Escalation Toggle
 AUTO_ESCALATE_CRITICAL_VITALS: bool = os.getenv("AUTO_ESCALATE_CRITICAL_VITALS", "false").lower() in ("true", "1", "yes")

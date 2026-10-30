@@ -4,7 +4,7 @@ from typing import Optional, Dict, Any, List
 from fastapi import APIRouter, HTTPException, status, Depends, Query, Request
 import httpx
 
-from app.core.config import TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_USERNAME
+from app.core.config import TELEGRAM_BOT_TOKEN, TELEGRAM_BOT_USERNAME, TELEGRAM_WEBHOOK_SECRET
 from app.core.security import get_current_user
 from app.core.database import supabase
 from app.notifications.schemas import (
@@ -18,7 +18,7 @@ from app.notifications.schemas import (
 from app.notifications.service import broadcast_notification
 from app.notifications.channels.in_app import _mock_notifications_db
 from app.notifications.channels.push_fcm import _mock_device_tokens_db
-from app.notifications.channels.telegram import _mock_telegram_links_db
+from app.notifications.channels.telegram import create_link_code, consume_link_code, save_telegram_link
 
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
@@ -82,7 +82,8 @@ def get_telegram_link_url(current_user: dict = Depends(get_current_user)):
     Returns Telegram bot deep-link URL for account linking.
     """
     user_id = current_user["user_id"]
-    url = f"https://t.me/{TELEGRAM_BOT_USERNAME}?start={user_id}"
+    code = create_link_code(user_id)
+    url = f"https://t.me/{TELEGRAM_BOT_USERNAME}?start={code}"
     return TelegramLinkUrlResponse(url=url)
 
 
@@ -90,9 +91,12 @@ def get_telegram_link_url(current_user: dict = Depends(get_current_user)):
 async def telegram_webhook(request: Request):
     """
     Telegram Bot API webhook receiver.
-    Parses incoming updates, handles '/start <user_id>', links account, and replies via Telegram API.
+    Parses incoming updates, handles '/start <one-time code>', links account, and replies via Telegram API.
     Must always return 200 OK.
     """
+    if TELEGRAM_WEBHOOK_SECRET and request.headers.get("x-telegram-bot-api-secret-token") != TELEGRAM_WEBHOOK_SECRET:
+        return {"status": "ok"}
+
     try:
         update_data = await request.json()
         message = update_data.get("message", {})
@@ -101,29 +105,19 @@ async def telegram_webhook(request: Request):
         chat_id = str(chat.get("id")) if chat.get("id") else None
         username = chat.get("username")
 
-        if text.startswith("/start ") and chat_id:
-            user_id = text.replace("/start ", "").strip()
+        if text.startswith("/start") and chat_id:
+            code = text[len("/start"):].strip()
+            user_id = consume_link_code(code) if code else None
 
-            now_str = datetime.now(timezone.utc).isoformat()
-            link_data = {
-                "id": str(uuid.uuid4()),
-                "user_id": user_id,
-                "telegram_chat_id": chat_id,
-                "telegram_username": username,
-                "is_active": True,
-                "linked_at": now_str,
-            }
-
-            if supabase is not None:
-                try:
-                    supabase.table("telegram_links").upsert(link_data, on_conflict="telegram_chat_id").execute()
-                except Exception:
-                    _mock_telegram_links_db[chat_id] = link_data
+            if user_id:
+                save_telegram_link(user_id, chat_id, username)
+                reply_text = "✅ ElderGuard AI is now linked to your Telegram. You will get SOS and medicine alerts here."
+            elif code:
+                reply_text = "That link has expired or was already used. Open ElderGuard AI and tap Connect Telegram again."
             else:
-                _mock_telegram_links_db[chat_id] = link_data
+                reply_text = "Hi! To link this chat, open ElderGuard AI and tap Connect Telegram."
 
             # Send reply via Telegram API if token configured
-            reply_text = "✅ ElderGuard AI is now linked to your Telegram!"
             if TELEGRAM_BOT_TOKEN and not TELEGRAM_BOT_TOKEN.startswith("123456789"):
                 try:
                     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
