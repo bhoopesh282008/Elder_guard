@@ -30,7 +30,16 @@ _mock_users_db: List[Dict[str, Any]] = []
 
 
 def _get_user_by_identifier(identifier: str) -> Dict[str, Any] | None:
-    """Helper to query user by email or phone from active database."""
+    """Helper to query user by email or phone, matching emails case-insensitively."""
+    identifier = identifier.strip()
+    lowered = identifier.lower()
+    if lowered != identifier:
+        # Accounts are stored lowercase now; the exact spelling covers older mixed-case ones.
+        return _lookup_user(identifier) or _lookup_user(lowered)
+    return _lookup_user(identifier)
+
+
+def _lookup_user(identifier: str) -> Dict[str, Any] | None:
     if supabase is not None:
         try:
             res_email = supabase.table("users").select("*").eq("email", identifier).execute()

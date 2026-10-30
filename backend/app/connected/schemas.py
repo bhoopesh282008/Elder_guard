@@ -1,6 +1,10 @@
+import re
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# 24-hour "08:00" or 12-hour "8:00 AM"
+_TIME_RE = re.compile(r"^(?:(?:[01]?\d|2[0-3]):[0-5]\d|(?:0?[1-9]|1[0-2]):[0-5]\d\s?[AaPp][Mm])$")
 
 
 class InviteRequest(BaseModel):
@@ -13,13 +17,30 @@ class InviteAcceptRequest(BaseModel):
 
 
 class MedicineCreateRequest(BaseModel):
-    name: str
-    dosage: str
+    name: str = Field(min_length=1, max_length=200)
+    dosage: str = Field(max_length=100)
     frequency: Optional[str] = None
     scheduled_times: List[str] = Field(default_factory=list)
-    instructions: Optional[str] = None
-    stock_count: int = 30
-    low_stock_threshold: int = 7
+    instructions: Optional[str] = Field(default=None, max_length=2000)
+    stock_count: int = Field(default=30, ge=0)
+    low_stock_threshold: int = Field(default=7, ge=0)
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Medicine name cannot be blank.")
+        return value
+
+    @field_validator("scheduled_times")
+    @classmethod
+    def _times_valid(cls, values: List[str]) -> List[str]:
+        cleaned = [v.strip() for v in values]
+        bad = [v for v in cleaned if not _TIME_RE.match(v)]
+        if bad:
+            raise ValueError(f"Invalid time(s) {bad}; use HH:MM or h:mm AM/PM.")
+        return cleaned
 
 
 class MedicineTakenRequest(BaseModel):

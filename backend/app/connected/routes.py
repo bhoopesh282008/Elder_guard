@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
@@ -85,7 +85,18 @@ def _medicine_rows(elder_id: str) -> List[Dict[str, Any]]:
         "SELECT * FROM connected_medicines WHERE elder_id = :elder_id AND is_active = 1 ORDER BY created_at DESC",
         {"elder_id": elder_id},
     )
-    return [parse_medicine(row) for row in rows]
+    meds = [parse_medicine(row) for row in rows]
+    day_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
+    taken_counts: Dict[str, int] = {}
+    for log in fetch_all(
+        "SELECT medicine_id FROM medicine_logs WHERE elder_id = :elder_id AND status = 'taken' AND taken_at >= :day_start",
+        {"elder_id": elder_id, "day_start": day_start},
+    ):
+        taken_counts[log["medicine_id"]] = taken_counts.get(log["medicine_id"], 0) + 1
+    for med in meds:
+        doses_today = max(1, len(med.get("scheduled_times") or []))
+        med["status"] = "taken" if taken_counts.get(med["id"], 0) >= doses_today else "pending"
+    return meds
 
 
 def _latest_vitals(elder_id: str) -> List[Dict[str, Any]]:
@@ -362,8 +373,15 @@ def elder_mark_taken(medicine_id: str, payload: MedicineTakenRequest, current_us
     med = fetch_one("SELECT * FROM connected_medicines WHERE id = :id AND elder_id = :elder_id", {"id": medicine_id, "elder_id": current_user["user_id"]})
     if not med:
         raise HTTPException(status_code=404, detail={"error": {"code": "MEDICINE_NOT_FOUND", "message": "Medicine not found."}})
-    log_id = new_id()
     taken_at = now_iso()
+    # A double-click or retry within a minute is the same dose: return it without logging or notifying again.
+    recent = fetch_one(
+        "SELECT * FROM medicine_logs WHERE medicine_id = :id AND status = 'taken' AND taken_at >= :since ORDER BY taken_at DESC LIMIT 1",
+        {"id": medicine_id, "since": (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()},
+    )
+    if recent:
+        return {"id": recent["id"], "medicine_id": medicine_id, "elder_id": current_user["user_id"], "scheduled_time": recent["scheduled_time"], "status": "taken", "taken_at": recent["taken_at"]}
+    log_id = new_id()
     scheduled_time = payload.scheduled_time or taken_at
     execute(
         """

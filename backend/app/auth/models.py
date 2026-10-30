@@ -1,5 +1,5 @@
 from typing import Optional, Literal
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 UserRole = Literal['elder', 'caregiver', 'doctor', 'hospital', 'pharmacy']
 AuthProvider = Literal['email', 'mobile', 'google']
@@ -10,6 +10,11 @@ class UserSignupEmail(BaseModel):
     phone_no: Optional[str] = None
     password: str = Field(..., min_length=6)
     role: UserRole
+
+    @field_validator("email")
+    @classmethod
+    def _lowercase_email(cls, value):
+        return value.lower() if value else value
 
 
 class UserLoginEmail(BaseModel):

@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { startSosAlarmSound, stopSosAlarmSound } from '../../utils/sosSound';
+import { getSosLocation } from '../../utils/sosLocation';
 import { 
   PhoneCall, 
   Pill, 
@@ -40,6 +41,8 @@ export default function ElderDashboard({ currentUser, onNavigateTab }) {
   const [sosActive, setSosActive] = useState(false);
   const [sosCountdown, setSosCountdown] = useState(10);
   const [sosSentConfirmed, setSosSentConfirmed] = useState(false);
+  const [sosSendFailed, setSosSendFailed] = useState(false);
+  const sosLocationRef = useRef(null);
   const [checkedIn, setCheckedIn] = useState(false);
   const [checkInTime, setCheckInTime] = useState('Not checked in today');
 
@@ -50,6 +53,27 @@ export default function ElderDashboard({ currentUser, onNavigateTab }) {
   const dashboardQuery = useElderDashboard(Boolean(currentUser?.id));
   const connectedMutations = useConnectedMutations();
   useElderRoom(currentUser?.id, Boolean(currentUser?.id));
+
+  // Fill the medicine and appointment cards from the shared dashboard record.
+  useEffect(() => {
+    const data = dashboardQuery.data;
+    if (!data) return;
+    setMedicines(data.today_medicines || []);
+    setUpcomingAppointments(data.upcoming_appointments || []);
+  }, [dashboardQuery.data]);
+
+  // One point per day with blood pressure and heart rate, oldest first, for the trend chart.
+  const vitalsChartData = useMemo(() => {
+    const byDay = new Map();
+    [...(dashboardQuery.data?.latest_vitals || [])].reverse().forEach((v) => {
+      const day = new Date(v.recorded_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      const point = byDay.get(day) || { recorded_at: day };
+      if (v.type === 'bp') point.systolic_bp = v.value?.systolic;
+      if (v.type === 'heart_rate') point.pulse_bpm = v.value?.value;
+      byDay.set(day, point);
+    });
+    return [...byDay.values()];
+  }, [dashboardQuery.data?.latest_vitals]);
   const [liveVitals, setLiveVitals] = useState(() => vitalsEngine.getVitals());
 
   useEffect(() => {
@@ -151,13 +175,20 @@ export default function ElderDashboard({ currentUser, onNavigateTab }) {
     spo2Val,
   ]);
 
+  // Look up the device position while the countdown runs so sending is not delayed.
+  useEffect(() => {
+    if (!sosActive) return;
+    sosLocationRef.current = null;
+    getSosLocation().then((loc) => { sosLocationRef.current = loc; });
+  }, [sosActive]);
+
   // SOS Countdown Timer & Sound Alarm
   useEffect(() => {
     let timer;
     if (sosActive && !sosSentConfirmed && sosCountdown > 0) {
       startSosAlarmSound("Emergency SOS Activated! Alerting Caretaker and Hospital Emergency Dispatch!");
       timer = setInterval(() => setSosCountdown(prev => prev - 1), 1000);
-    } else if (sosActive && !sosSentConfirmed && sosCountdown === 0) {
+    } else if (sosActive && !sosSentConfirmed && !sosSendFailed && sosCountdown === 0) {
       triggerBackendEmergencySOS();
     } else if (!sosActive) {
       stopSosAlarmSound();
@@ -166,32 +197,47 @@ export default function ElderDashboard({ currentUser, onNavigateTab }) {
       clearInterval(timer);
       if (!sosActive) stopSosAlarmSound();
     };
-  }, [sosActive, sosSentConfirmed, sosCountdown]);
+  }, [sosActive, sosSentConfirmed, sosSendFailed, sosCountdown]);
 
   const triggerBackendEmergencySOS = async () => {
+    const { lat, lng } = sosLocationRef.current || (await getSosLocation(1000));
+    let delivered = false;
     try {
-      await emergencyService.triggerSOS(37.7749, -122.4194);
+      await emergencyService.triggerSOS(lat, lng);
+      delivered = true;
     } catch (e) {
       console.warn('Emergency service SOS trigger error', e);
     }
     try {
-      await connectedMutations.triggerSOS.mutateAsync({
-        location: { lat: 37.7749, lng: -122.4194 }
-      });
+      await connectedMutations.triggerSOS.mutateAsync({ location: { lat, lng } });
+      delivered = true;
     } catch (e) {
       console.warn('Backend connected SOS trigger error', e);
+    }
+
+    // Never show "sent" when neither service accepted the alert.
+    if (!delivered) {
+      setSosSendFailed(true);
+      return;
     }
 
     broadcastRealtimeEvent('elderguard:realtime-event', {
       event: 'sos:triggered',
       type: 'sos',
       elder_name: currentUser?.name || 'Elder Patient',
-      location_lat: 37.7749,
-      location_lng: -122.4194,
+      location_lat: lat,
+      location_lng: lng,
       triggered_at: new Date().toISOString()
     });
 
     setSosSentConfirmed(true);
+  };
+
+  const closeSosModal = () => {
+    setSosActive(false);
+    setSosSentConfirmed(false);
+    setSosSendFailed(false);
+    setSosCountdown(10);
   };
 
   const handleCheckIn = async () => {
@@ -339,12 +385,12 @@ export default function ElderDashboard({ currentUser, onNavigateTab }) {
             </div>
 
             {/* Weekly Trend Graph */}
-            {vitalsTrend.length > 0 && (
+            {vitalsChartData.length > 0 && (
               <div className="pt-2">
                 <span className="text-xs font-bold text-[#6B7280] uppercase tracking-wider block mb-2">Vitals Trend Graph</span>
                 <div className="h-56 w-full">
                   <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={vitalsTrend}>
+                    <LineChart data={vitalsChartData}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#EBE3D5" />
                       <XAxis dataKey="recorded_at" stroke="#6B7280" />
                       <YAxis stroke="#6B7280" domain={[60, 180]} />
@@ -476,7 +522,32 @@ export default function ElderDashboard({ currentUser, onNavigateTab }) {
       {sosActive && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-4 animate-in fade-in">
           <div className="bg-white border-4 border-[#D32F2F] rounded-3xl p-8 max-w-md w-full text-center space-y-6 shadow-2xl">
-            {!sosSentConfirmed ? (
+            {sosSendFailed ? (
+              <>
+                <h3 className="text-2xl font-bold text-[#C62828]">SOS NOT SENT</h3>
+                <p className="text-sm text-[#525252] font-semibold leading-relaxed">
+                  We could not reach ElderGuard. Please call <strong>112</strong> or your caregiver now.
+                </p>
+                <a
+                  href="tel:112"
+                  className="block w-full py-4 rounded-2xl bg-[#C62828] hover:bg-[#B71C1C] text-white font-bold text-lg shadow-lg transition"
+                >
+                  Call 112
+                </a>
+                <button
+                  onClick={() => setSosSendFailed(false)}
+                  className="w-full py-4 rounded-2xl bg-[#FAF7F2] text-[#2E2E2E] font-bold text-lg border border-[#EBE3D5] cursor-pointer hover:bg-gray-100 transition"
+                >
+                  Try Again
+                </button>
+                <button
+                  onClick={closeSosModal}
+                  className="w-full py-3 rounded-2xl text-[#525252] font-semibold text-sm cursor-pointer hover:bg-gray-100 transition"
+                >
+                  Close
+                </button>
+              </>
+            ) : !sosSentConfirmed ? (
               <>
                 <h3 className="text-3xl font-fraunces font-bold text-[#C62828]">EMERGENCY SOS</h3>
                 <p className="text-sm text-[#5C5C5C] font-medium">

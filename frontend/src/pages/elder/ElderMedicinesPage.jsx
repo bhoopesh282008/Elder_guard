@@ -1,5 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { startSosAlarmSound, stopSosAlarmSound } from '../../utils/sosSound';
+import { getSosLocation, FALLBACK_SOS_LOCATION } from '../../utils/sosLocation';
 import { 
   Pill, 
   Clock, 
@@ -34,6 +35,7 @@ export default function ElderMedicinesPage({ currentUser, onNavigateTab }) {
   const [sosActive, setSosActive] = useState(false);
   const [sosCountdown, setSosCountdown] = useState(10);
   const [sosSentConfirmed, setSosSentConfirmed] = useState(false);
+  const sosLocationRef = useRef(null);
   const [activeSpeechId, setActiveSpeechId] = useState(null);
   const [refillSuccessMsg, setRefillSuccessMsg] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
@@ -201,25 +203,33 @@ export default function ElderMedicinesPage({ currentUser, onNavigateTab }) {
     };
   }, [elderId]);
 
+  // Look up the device position while the countdown runs so sending is not delayed.
+  useEffect(() => {
+    if (!sosActive) return;
+    sosLocationRef.current = null;
+    getSosLocation().then((loc) => { sosLocationRef.current = loc; });
+  }, [sosActive]);
+
   useEffect(() => {
     let timer;
     if (sosActive && !sosSentConfirmed && sosCountdown > 0) {
       startSosAlarmSound("Emergency SOS Activated! Dispatching alert to Caretaker and Emergency Desk.");
       timer = setInterval(() => setSosCountdown(prev => prev - 1), 1000);
     } else if (sosActive && !sosSentConfirmed && sosCountdown === 0) {
+      const { lat, lng } = sosLocationRef.current || FALLBACK_SOS_LOCATION;
       try {
-        emergencyService.triggerSOS(37.7749, -122.4194);
+        emergencyService.triggerSOS(lat, lng);
       } catch (err) {
         console.warn('Emergency service SOS trigger fallback:', err);
       }
-      connectedMutations.triggerSOS.mutate({ location: { lat: 37.7749, lng: -122.4194 } });
+      connectedMutations.triggerSOS.mutate({ location: { lat, lng } });
 
       broadcastRealtimeEvent('elderguard:realtime-event', {
         event: 'sos:triggered',
         type: 'sos',
         elder_name: currentUser?.name || 'Elder Patient',
-        location_lat: 37.7749,
-        location_lng: -122.4194,
+        location_lat: lat,
+        location_lng: lng,
         triggered_at: new Date().toISOString()
       });
 

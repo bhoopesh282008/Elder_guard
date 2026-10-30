@@ -53,7 +53,7 @@ many_messages = [
 req_trunc = ChatRequest(elder_id=elder_id, message="Latest", history=many_messages)
 _, formatted_hist = build_prompt(req_trunc)
 assert len(formatted_hist) == 20, f"Expected 20 history items, got {len(formatted_hist)}"
-assert formatted_hist[0]["parts"][0] == "Msg 5", f"Expected oldest truncated to be Msg 5, got {formatted_hist[0]['parts'][0]}"
+assert formatted_hist[0]["content"] == "Msg 5", f"Expected oldest truncated to be Msg 5, got {formatted_hist[0]['content']}"
 print("[OK] Step 3 Passed: History truncated to last 20 messages (oldest first).")
 
 # STEP 4: Distress Signal Detection & Caregiver Notification
@@ -76,13 +76,13 @@ res_normal = chat_with_ai_companion(req_normal, user_elder)
 assert res_normal.distress_flagged == False
 print("[OK] Step 5 Passed: Normal message processed without distress flag.")
 
-# STEP 6: Gemini API Failure Graceful Fallback
-print("\n--- STEP 6: Gemini API Failure Fallback ---")
-with patch("app.ai_companion.routes.call_gemini_api", return_value=FALLBACK_REPLY_MESSAGE):
+# STEP 6: Groq API Failure Graceful Fallback
+print("\n--- STEP 6: Groq API Failure Fallback ---")
+with patch("app.ai_companion.routes.call_groq_api", return_value=FALLBACK_REPLY_MESSAGE):
     req_fail = ChatRequest(elder_id=elder_id, message="Hello?")
     res_fail = chat_with_ai_companion(req_fail, user_elder)
     assert res_fail.reply == FALLBACK_REPLY_MESSAGE
-print("[OK] Step 6 Passed: Gemini failure returned graceful fallback message (200 OK).")
+print("[OK] Step 6 Passed: Groq failure returned graceful fallback message (200 OK).")
 
 # STEP 7: Persistence Toggle Disabled
 print("\n--- STEP 7: Persistence Toggle Disabled ---")
