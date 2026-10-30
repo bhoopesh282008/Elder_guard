@@ -22,8 +22,7 @@ import {
 import reportsService from '../../services/reportsService';
 import doctorRecordsService from '../../services/doctorRecordsService';
 import aiCompanionService from '../../services/aiCompanionService';
-import emergencyService from '../../services/emergencyService';
-import connectedPortalService from '../../services/connectedPortalService';
+import { sendSos } from '../../utils/sendSos';
 import broadcastRealtimeEvent from '../../utils/realtimeBus';
 import tabStorage from '../../utils/tabStorage';
 
@@ -98,23 +97,20 @@ export default function ElderMedicalReportsPage({ currentUser }) {
   }, [sosActive, sosSentConfirmed, sosCountdown]);
 
   const triggerEmergencySOS = async () => {
-    try {
-      await emergencyService.triggerSOS();
-    } catch (e) {
-      console.warn('Emergency SOS trigger error', e);
-    }
-    try {
-      await connectedPortalService.triggerSOS();
-    } catch (e) {
-      console.warn('Connected SOS trigger error', e);
+    const { delivered, location } = await sendSos();
+    if (!delivered) {
+      setSosActive(false);
+      setSosCountdown(10);
+      if (window.confirm('Your SOS could not be sent. Call 112 now?')) window.location.href = 'tel:112';
+      return;
     }
 
     broadcastRealtimeEvent('elderguard:realtime-event', {
       event: 'sos:triggered',
       type: 'sos',
       elder_name: currentUser?.name || 'Elder Patient',
-      location_lat: 37.7749,
-      location_lng: -122.4194,
+      location_lat: location.lat,
+      location_lng: location.lng,
       triggered_at: new Date().toISOString()
     });
 

@@ -37,6 +37,43 @@ export const connectedPortalService = {
     return response.data;
   },
 
+  async acknowledgeSOS(elderId, eventId) {
+    const response = await api.post(`/api/caregiver/elders/${elderId}/sos/${eventId}/acknowledge`);
+    return response.data;
+  },
+
+  async resolveSOS(elderId, eventId, resolutionNotes = null) {
+    const response = await api.post(`/api/caregiver/elders/${elderId}/sos/${eventId}/resolve`, {
+      resolution_notes: resolutionNotes,
+    });
+    return response.data;
+  },
+
+  async pendingInvites() {
+    const response = await api.get('/api/elder/invites');
+    return response.data;
+  },
+
+  async declineInvite(linkId) {
+    const response = await api.post(`/api/elder/invites/${linkId}/decline`);
+    return response.data;
+  },
+
+  async telegramStatus() {
+    const response = await api.get('/notifications/telegram/status');
+    return response.data;
+  },
+
+  async telegramLinkUrl() {
+    const response = await api.get('/notifications/telegram/link-url');
+    return response.data;
+  },
+
+  async telegramUnlink() {
+    const response = await api.delete('/notifications/telegram/link');
+    return response.data;
+  },
+
   async notifications() {
     const response = await api.get('/api/notifications');
     return response.data;

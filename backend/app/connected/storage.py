@@ -222,6 +222,14 @@ def initialize_connected_schema() -> None:
             )
         """))
         conn.execute(text("CREATE INDEX IF NOT EXISTS idx_connected_sos_elder ON connected_sos_events(elder_id, triggered_at)"))
+        sos_columns = _table_columns("connected_sos_events")
+        for column, definition in {
+            "acknowledged_by": "TEXT",
+            "acknowledged_at": "TEXT",
+            "escalation_level": "INTEGER NOT NULL DEFAULT 0",
+        }.items():
+            if column not in sos_columns:
+                conn.execute(text(f"ALTER TABLE connected_sos_events ADD COLUMN {column} {definition}"))
 
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS checkins (
@@ -351,6 +359,18 @@ def initialize_connected_schema() -> None:
         """))
 
 
+def display_name(user_id: Optional[str]) -> str:
+    """Best human-readable name for any account type."""
+    if not user_id:
+        return "Someone"
+    for table, column in (("caregiver_profiles", "name"), ("elder_profiles", "name"), ("hospital_profiles", "office_name")):
+        row = fetch_one(f"SELECT {column} AS n FROM {table} WHERE user_id = :id", {"id": user_id})
+        if row and row.get("n"):
+            return row["n"]
+    user = fetch_one("SELECT email FROM users WHERE id = :id", {"id": user_id})
+    return (user or {}).get("email") or "Someone"
+
+
 def get_user(user_id: str) -> Optional[Dict[str, Any]]:
     return fetch_one("SELECT * FROM users WHERE id = :id LIMIT 1", {"id": user_id})
 
@@ -473,43 +493,15 @@ def audit(elder_id: str, performed_by: str, action: str, resource_type: str, res
 
 logger = logging.getLogger("elderguard.connected")
 
-# Alert types worth a phone buzz; the rest stay in-app only.
-TELEGRAM_ALERT_TYPES = {"sos_triggered", "medicine_taken", "medicine_reminder"}
-
-
-def _person_name(user_id: Optional[str]) -> str:
-    if not user_id:
-        return "Your elder"
-    row = fetch_one("SELECT name FROM elder_profiles WHERE user_id = :id", {"id": user_id})
-    return (row or {}).get("name") or "Your elder"
-
-
-def telegram_alert_text(type_: str, payload: Dict[str, Any]) -> Optional[str]:
-    if type_ == "sos_triggered":
-        text = f"🚨 SOS from {_person_name(payload.get('elder_id'))}. They pressed the emergency button."
-        loc = payload.get("location") or {}
-        if isinstance(loc, dict) and loc.get("lat") is not None and loc.get("lng") is not None:
-            text += f"\nLocation: https://maps.google.com/?q={loc['lat']},{loc['lng']}"
-        return text
-    if type_ == "medicine_taken":
-        return f"💊 {_person_name(payload.get('elder_id'))} marked a medicine as taken."
-    if type_ == "medicine_reminder":
-        return f"⏰ Medicine reminder for {_person_name(payload.get('elder_id'))}."
-    return None
+def _telegram_alert_types() -> set:
+    from app.connected.telegram_bot import ALERT_TYPES
+    return ALERT_TYPES
 
 
 def _push_telegram(user_ids: List[str], type_: str, payload: Dict[str, Any]) -> None:
-    # Imported here so the connected module never fails to load if the notification package changes.
-    from app.notifications.channels.telegram import get_active_telegram_link, send_telegram_message
-    try:
-        text = telegram_alert_text(type_, payload)
-        if not text:
-            return
-        for user_id in user_ids:
-            if get_active_telegram_link(user_id):
-                send_telegram_message(user_id, text, parse_mode=None)
-    except Exception:
-        logger.exception("Telegram alert failed for %s", type_)
+    # Imported here so the connected module never fails to load if the Telegram side changes.
+    from app.connected.telegram_bot import push_alert
+    push_alert(user_ids, type_, payload)
 
 
 def notify(user_ids: Iterable[str], type_: str, payload: Dict[str, Any]) -> None:
@@ -523,7 +515,7 @@ def notify(user_ids: Iterable[str], type_: str, payload: Dict[str, Any]) -> None
             """,
             {"id": new_id(), "user_id": user_id, "type": type_, "payload": dumps(payload), "created_at": created_at},
         )
-    if recipients and type_ in TELEGRAM_ALERT_TYPES:
+    if recipients and type_ in _telegram_alert_types():
         # Network call to Telegram must never slow down or fail the API request.
         threading.Thread(target=_push_telegram, args=(recipients, type_, payload), daemon=True).start()
 

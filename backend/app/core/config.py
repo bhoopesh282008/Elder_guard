@@ -44,3 +44,7 @@ AUTO_ESCALATE_CRITICAL_VITALS: bool = os.getenv("AUTO_ESCALATE_CRITICAL_VITALS",
 
 # AI Companion Chat History Persistence Toggle
 PERSIST_CHAT_HISTORY: bool = os.getenv("PERSIST_CHAT_HISTORY", "false").lower() in ("true", "1", "yes")
+
+# Local time of the daily Telegram care summary (hour, and the UTC offset in minutes; 330 = India).
+TELEGRAM_SUMMARY_HOUR: int = int(os.getenv("TELEGRAM_SUMMARY_HOUR", "20"))
+TELEGRAM_TZ_OFFSET_MINUTES: int = int(os.getenv("TELEGRAM_TZ_OFFSET_MINUTES", "330"))

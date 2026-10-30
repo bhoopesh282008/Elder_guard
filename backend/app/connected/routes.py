@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 
 from app.connected.realtime import elder_room_manager
+from app.connected.sos_actions import SosActionError, acknowledge_sos
 from app.connected.schemas import (
     AppointmentCreateRequest,
     CheckInRequest,
@@ -26,6 +27,7 @@ from app.connected.storage import (
     fetch_one,
     find_elder,
     get_elder_profile,
+    get_user,
     linked_caregiver_ids,
     linked_hospital_ids,
     loads,
@@ -182,44 +184,76 @@ def invite_elder(payload: InviteRequest, current_user: dict = Depends(get_curren
         {"elder_id": elder["id"], "caregiver_id": caregiver_id},
     )
     if existing:
-        if existing.get("status") != "active":
-            execute(
-                """
-                UPDATE elder_caregiver_links
-                SET status = 'active', permission_level = :permission_level, accepted_at = :accepted_at, updated_at = :updated_at
-                WHERE id = :id
-                """,
-                {
-                    "id": existing["id"],
-                    "permission_level": payload.permission_level,
-                    "accepted_at": created,
-                    "updated_at": created,
-                },
-            )
-            existing = fetch_one("SELECT * FROM elder_caregiver_links WHERE id = :id", {"id": existing["id"]}) or existing
-        return normalize_link(existing)
+        if existing.get("status") == "active":
+            return normalize_link(existing)
+        # Pending, declined or revoked: ask the elder again. Access is only granted by their acceptance.
+        execute(
+            """
+            UPDATE elder_caregiver_links
+            SET status = 'pending', permission_level = :permission_level, invited_by = :invited_by, invited_at = :now, updated_at = :now
+            WHERE id = :id
+            """,
+            {"id": existing["id"], "permission_level": payload.permission_level, "invited_by": caregiver_id, "now": created},
+        )
+        link_id = existing["id"]
+    else:
+        execute(
+            """
+            INSERT INTO elder_caregiver_links
+            (id, elder_id, caregiver_id, permission_level, status, invited_by, invited_at, accepted_at, created_at, updated_at)
+            VALUES (:id, :elder_id, :caregiver_id, :permission_level, 'pending', :invited_by, :invited_at, NULL, :created_at, :updated_at)
+            """,
+            {
+                "id": link_id,
+                "elder_id": elder["id"],
+                "caregiver_id": caregiver_id,
+                "permission_level": payload.permission_level,
+                "invited_by": caregiver_id,
+                "invited_at": created,
+                "created_at": created,
+                "updated_at": created,
+            },
+        )
+    caregiver_profile = fetch_one("SELECT name FROM caregiver_profiles WHERE user_id = :id", {"id": caregiver_id}) or {}
+    caregiver_name = caregiver_profile.get("name") or (get_user(caregiver_id) or {}).get("email") or "A caregiver"
+    audit(elder["id"], caregiver_id, "elder.invited", "elder_caregiver_link", link_id, {"permission_level": payload.permission_level})
+    notify([elder["id"]], "caregiver_invite", {"link_id": link_id, "caregiver_id": caregiver_id, "caregiver_name": caregiver_name, "permission_level": payload.permission_level})
+    elder_room_manager.emit_background(elder["id"], "link:invited", {"link_id": link_id, "caregiver_name": caregiver_name})
+    return normalize_link(fetch_one("SELECT * FROM elder_caregiver_links WHERE id = :id", {"id": link_id}) or {})
 
-    execute(
+
+@router.get("/elder/invites")
+def list_pending_invites(current_user: dict = Depends(get_current_user)):
+    require_role(current_user, ["elder"])
+    rows = fetch_all(
         """
-        INSERT INTO elder_caregiver_links
-        (id, elder_id, caregiver_id, permission_level, status, invited_by, invited_at, accepted_at, created_at, updated_at)
-        VALUES (:id, :elder_id, :caregiver_id, :permission_level, 'active', :invited_by, :invited_at, :accepted_at, :created_at, :updated_at)
+        SELECT l.id, l.caregiver_id, l.permission_level, l.invited_at, cp.name AS caregiver_name, cp.relationship_to_elder, u.email AS caregiver_email
+        FROM elder_caregiver_links l
+        LEFT JOIN caregiver_profiles cp ON cp.user_id = l.caregiver_id
+        LEFT JOIN users u ON u.id = l.caregiver_id
+        WHERE l.elder_id = :elder_id AND l.status = 'pending'
+        ORDER BY l.invited_at DESC
         """,
-        {
-            "id": link_id,
-            "elder_id": elder["id"],
-            "caregiver_id": caregiver_id,
-            "permission_level": payload.permission_level,
-            "invited_by": current_user["user_id"],
-            "invited_at": created,
-            "accepted_at": created,
-            "created_at": created,
-            "updated_at": created,
-        },
+        {"elder_id": current_user["user_id"]},
     )
-    audit(elder["id"], caregiver_id, "elder.linked", "elder_caregiver_link", link_id, {"permission_level": payload.permission_level})
-    elder_room_manager.emit_background(elder["id"], "link:accepted", {"caregiver_id": caregiver_id, "permission_level": payload.permission_level})
-    return fetch_one("SELECT * FROM elder_caregiver_links WHERE id = :id", {"id": link_id})
+    return rows
+
+
+@router.post("/elder/invites/{link_id}/decline")
+def decline_invite(link_id: str, current_user: dict = Depends(get_current_user)):
+    require_role(current_user, ["elder"])
+    link = fetch_one("SELECT * FROM elder_caregiver_links WHERE id = :id LIMIT 1", {"id": link_id})
+    if not link or link["elder_id"] != current_user["user_id"]:
+        raise HTTPException(status_code=404, detail={"error": {"code": "INVITE_NOT_FOUND", "message": "Invite not found for this elder."}})
+    if link.get("status") != "pending":
+        raise HTTPException(status_code=409, detail={"error": {"code": "INVITE_NOT_PENDING", "message": "This invite is no longer pending."}})
+    execute("UPDATE elder_caregiver_links SET status = 'declined', updated_at = :now WHERE id = :id", {"id": link_id, "now": now_iso()})
+    execute(
+        "UPDATE connected_notifications SET read = 1 WHERE user_id = :elder_id AND type = 'caregiver_invite' AND payload LIKE :m",
+        {"elder_id": link["elder_id"], "m": f"%{link_id}%"},
+    )
+    audit(link["elder_id"], link["elder_id"], "elder.invite_declined", "elder_caregiver_link", link_id, {})
+    return {"id": link_id, "status": "declined"}
 
 
 @router.post("/elder/invites/{link_id}/accept")
@@ -228,6 +262,8 @@ def accept_invite(link_id: str, payload: InviteAcceptRequest, current_user: dict
     link = fetch_one("SELECT * FROM elder_caregiver_links WHERE id = :id LIMIT 1", {"id": link_id})
     if not link or link["elder_id"] != current_user["user_id"]:
         raise HTTPException(status_code=404, detail={"error": {"code": "INVITE_NOT_FOUND", "message": "Invite not found for this elder."}})
+    if link.get("status") == "active":
+        return normalize_link(link)
     accepted_at = now_iso()
     permission = payload.permission_level or link.get("permission_level") or "full_access"
     execute(
@@ -500,6 +536,20 @@ def elder_trigger_sos(payload: SOSTriggerRequest, current_user: dict = Depends(g
     sos["location"] = loads(sos.get("location"), None)
     notify(recipients, "sos_triggered", {"sos_event_id": event_id, "elder_id": elder_id, "location": sos["location"]})
     elder_room_manager.emit_background(elder_id, "sos:triggered", sos)
+    return sos
+
+
+@router.post("/caregiver/elders/{elder_id}/sos/{event_id}/acknowledge")
+def caregiver_acknowledge_sos(elder_id: str, event_id: str, current_user: dict = Depends(get_current_user)):
+    require_role(current_user, ["caregiver", "hospital"])
+    event = fetch_one("SELECT elder_id FROM connected_sos_events WHERE id = :id", {"id": event_id})
+    if not event or event["elder_id"] != elder_id:
+        raise HTTPException(status_code=404, detail={"error": {"code": "SOS_NOT_FOUND", "message": "SOS event not found."}})
+    try:
+        sos = acknowledge_sos(event_id, current_user["user_id"], current_user.get("role"))
+    except SosActionError as e:
+        code = status.HTTP_404_NOT_FOUND if e.code == "SOS_NOT_FOUND" else status.HTTP_403_FORBIDDEN
+        raise HTTPException(status_code=code, detail={"error": {"code": e.code, "message": e.message}})
     return sos
 
 

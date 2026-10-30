@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { startSosAlarmSound, stopSosAlarmSound } from '../../utils/sosSound';
 import { getSosLocation } from '../../utils/sosLocation';
+import PendingInvitesCard from '../../components/common/PendingInvitesCard';
+import TelegramConnectCard from '../../components/common/TelegramConnectCard';
 import { 
   PhoneCall, 
   Pill, 
@@ -283,7 +285,9 @@ export default function ElderDashboard({ currentUser, onNavigateTab }) {
         
         {/* Left / Center Column */}
         <div className="lg:col-span-8 space-y-8">
-          
+
+          <PendingInvitesCard />
+
           {/* Greeting Card */}
           <div className="bg-gradient-to-br from-[#FFE8D6] via-[#FFF3E5] to-[#FCEFE3] border border-[#F5DFCD] shadow-[0_10px_30px_rgba(245,223,205,0.4)] rounded-3xl p-6 md:p-8 relative overflow-hidden">
             <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-6">
@@ -301,6 +305,8 @@ export default function ElderDashboard({ currentUser, onNavigateTab }) {
               </div>
             </div>
           </div>
+
+          <TelegramConnectCard />
 
           {/* Today's Medicine Card */}
           <div className="bg-white border border-[#EBE3D5] shadow-[0_8px_30px_rgba(0,0,0,0.04)] rounded-3xl p-6 md:p-8 space-y-6">

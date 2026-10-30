@@ -160,7 +160,7 @@ def deactivate_telegram_link(chat_id: str):
             link["is_active"] = False
 
 
-def send_telegram_message(user_id: str, text: str, parse_mode: Optional[str] = "Markdown") -> Dict[str, Any]:
+def send_telegram_message(user_id: str, text: str, parse_mode: Optional[str] = "Markdown", reply_markup: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """
     Sends Telegram message to user via Telegram Bot API HTTP request.
     Pass parse_mode=None for text that may contain Markdown control characters (names, medicines).
@@ -179,6 +179,8 @@ def send_telegram_message(user_id: str, text: str, parse_mode: Optional[str] = "
     payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
     if parse_mode:
         payload["parse_mode"] = parse_mode
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
 
     try:
         response = httpx.post(url, json=payload, timeout=5.0)
@@ -203,7 +205,7 @@ def register_webhook(base_url: str) -> Dict[str, Any]:
         return {"success": False, "reason": "no_token"}
     body: Dict[str, Any] = {
         "url": f"{base_url.rstrip('/')}/notifications/telegram/webhook",
-        "allowed_updates": ["message"],
+        "allowed_updates": ["message", "callback_query"],
     }
     if TELEGRAM_WEBHOOK_SECRET:
         body["secret_token"] = TELEGRAM_WEBHOOK_SECRET
@@ -214,3 +216,93 @@ def register_webhook(base_url: str) -> Dict[str, Any]:
         return {"success": False, "reason": res.get("description", "telegram_api_error")}
     except Exception as e:
         return {"success": False, "reason": str(e)}
+
+
+def _bot_ready() -> bool:
+    return bool(TELEGRAM_BOT_TOKEN) and not TELEGRAM_BOT_TOKEN.startswith("123456789")
+
+
+def telegram_api(method: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Calls any Bot API method. Mocked (logged, success) when no real token is configured."""
+    if not _bot_ready():
+        logger.info(f"[MOCK TELEGRAM {method}] {payload}")
+        return {"success": True}
+    try:
+        res = httpx.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}", json=payload, timeout=5.0).json()
+        if res.get("ok"):
+            return {"success": True, "result": res.get("result")}
+        logger.warning(f"Telegram {method} failed: {res}")
+        return {"success": False, "reason": res.get("description", "telegram_api_error")}
+    except Exception as e:
+        logger.error(f"Telegram {method} error: {e}")
+        return {"success": False, "reason": str(e)}
+
+
+def send_to_chat(chat_id: str, text: str, reply_markup: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"chat_id": chat_id, "text": text}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    return telegram_api("sendMessage", payload)
+
+
+def send_telegram_location(user_id: str, lat: float, lng: float) -> Dict[str, Any]:
+    link = get_active_telegram_link(user_id)
+    if not link:
+        return {"success": False, "reason": "not_linked"}
+    return telegram_api("sendLocation", {"chat_id": link["telegram_chat_id"], "latitude": lat, "longitude": lng})
+
+
+def send_telegram_contact(user_id: str, phone: str, first_name: str) -> Dict[str, Any]:
+    link = get_active_telegram_link(user_id)
+    if not link:
+        return {"success": False, "reason": "not_linked"}
+    return telegram_api("sendContact", {"chat_id": link["telegram_chat_id"], "phone_number": phone, "first_name": first_name})
+
+
+def answer_callback(callback_id: str, text: str) -> Dict[str, Any]:
+    return telegram_api("answerCallbackQuery", {"callback_query_id": callback_id, "text": text})
+
+
+def edit_message_markup(chat_id: str, message_id: int, reply_markup: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return telegram_api("editMessageReplyMarkup", {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup or {"inline_keyboard": []}})
+
+
+def get_user_id_for_chat(chat_id: str) -> Optional[str]:
+    if supabase is not None:
+        try:
+            res = supabase.table("telegram_links").select("user_id").eq("telegram_chat_id", chat_id).eq("is_active", True).execute()
+            if res.data:
+                return res.data[0]["user_id"]
+        except Exception:
+            pass
+    if _ensure_tables():
+        with _engine().connect() as conn:
+            row = conn.execute(sql("SELECT user_id FROM telegram_chat_links WHERE telegram_chat_id = :c AND is_active = 1"), {"c": chat_id}).fetchone()
+        if row:
+            return row[0]
+    link = _mock_telegram_links_db.get(chat_id)
+    return link["user_id"] if link and link.get("is_active", True) else None
+
+
+def linked_user_ids() -> list:
+    """All users that currently have an active Telegram link (local store)."""
+    ids = set()
+    if _ensure_tables():
+        with _engine().connect() as conn:
+            ids.update(r[0] for r in conn.execute(sql("SELECT user_id FROM telegram_chat_links WHERE is_active = 1")).fetchall())
+    ids.update(l["user_id"] for l in _mock_telegram_links_db.values() if l.get("is_active", True))
+    return list(ids)
+
+
+def unlink_user(user_id: str) -> None:
+    if supabase is not None:
+        try:
+            supabase.table("telegram_links").update({"is_active": False}).eq("user_id", user_id).execute()
+        except Exception:
+            pass
+    if _ensure_tables():
+        with _engine().begin() as conn:
+            conn.execute(sql("UPDATE telegram_chat_links SET is_active = 0 WHERE user_id = :u"), {"u": user_id})
+    for link in _mock_telegram_links_db.values():
+        if link.get("user_id") == user_id:
+            link["is_active"] = False

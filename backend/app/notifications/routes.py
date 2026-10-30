@@ -18,7 +18,14 @@ from app.notifications.schemas import (
 from app.notifications.service import broadcast_notification
 from app.notifications.channels.in_app import _mock_notifications_db
 from app.notifications.channels.push_fcm import _mock_device_tokens_db
-from app.notifications.channels.telegram import create_link_code, consume_link_code, save_telegram_link
+from app.notifications.channels.telegram import (
+    create_link_code,
+    consume_link_code,
+    get_active_telegram_link,
+    save_telegram_link,
+    send_telegram_message,
+    unlink_user,
+)
 
 router = APIRouter(prefix="/notifications", tags=["Notifications"])
 
@@ -87,6 +94,37 @@ def get_telegram_link_url(current_user: dict = Depends(get_current_user)):
     return TelegramLinkUrlResponse(url=url)
 
 
+@router.get("/telegram/status")
+def get_telegram_status(current_user: dict = Depends(get_current_user)):
+    """Whether the current user has linked Telegram, so the UI can show Connected."""
+    link = get_active_telegram_link(current_user["user_id"])
+    return {
+        "linked": bool(link),
+        "telegram_username": (link or {}).get("telegram_username"),
+        "bot_username": TELEGRAM_BOT_USERNAME,
+        "bot_configured": bool(TELEGRAM_BOT_TOKEN) and not TELEGRAM_BOT_TOKEN.startswith("123456789"),
+    }
+
+
+@router.post("/telegram/test")
+def send_telegram_test(current_user: dict = Depends(get_current_user)):
+    """Sends a harmless test alert so the user can confirm Telegram works."""
+    result = send_telegram_message(
+        current_user["user_id"],
+        "✅ Test alert from ElderGuard AI. Telegram is connected and working.",
+        parse_mode=None,
+    )
+    if not result.get("success") and result.get("reason") == "not_linked":
+        raise HTTPException(status_code=409, detail="Telegram is not linked for this account.")
+    return {"success": bool(result.get("success"))}
+
+
+@router.delete("/telegram/link")
+def delete_telegram_link(current_user: dict = Depends(get_current_user)):
+    unlink_user(current_user["user_id"])
+    return {"linked": False}
+
+
 @router.post("/telegram/webhook", status_code=status.HTTP_200_OK)
 async def telegram_webhook(request: Request):
     """
@@ -99,6 +137,13 @@ async def telegram_webhook(request: Request):
 
     try:
         update_data = await request.json()
+
+        callback = update_data.get("callback_query")
+        if callback:
+            from app.connected.telegram_bot import handle_callback
+            handle_callback(callback)
+            return {"status": "ok"}
+
         message = update_data.get("message", {})
         text: str = message.get("text", "")
         chat = message.get("chat", {})
@@ -124,6 +169,10 @@ async def telegram_webhook(request: Request):
                     httpx.post(url, json={"chat_id": chat_id, "text": reply_text}, timeout=5.0)
                 except Exception:
                     pass
+
+        elif text.startswith("/") and chat_id:
+            from app.connected.telegram_bot import handle_message
+            handle_message(chat_id, text)
 
     except Exception:
         pass

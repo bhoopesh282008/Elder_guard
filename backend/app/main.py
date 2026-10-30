@@ -33,6 +33,7 @@ from app.medicines.scheduler import start_scheduler, shutdown_scheduler
 from app.emergency.scheduler import start_emergency_scheduler, shutdown_emergency_scheduler
 from app.appointments.scheduler import start_appointments_scheduler, shutdown_appointments_scheduler
 from app.vitals.scheduler import start_vitals_scheduler, shutdown_vitals_scheduler
+from app.connected.scheduler import start_connected_scheduler, shutdown_connected_scheduler
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
@@ -63,12 +64,14 @@ async def lifespan(app: FastAPI):
     start_appointments_scheduler()
     start_vitals_scheduler()
     _register_telegram_webhook()
+    start_connected_scheduler()
     yield
     # Shutdown: stop background schedulers
     shutdown_scheduler()
     shutdown_emergency_scheduler()
     shutdown_appointments_scheduler()
     shutdown_vitals_scheduler()
+    shutdown_connected_scheduler()
 
 
 app = FastAPI(

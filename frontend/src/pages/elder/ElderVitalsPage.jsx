@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import vitalsService from '../../services/vitalsService';
 import connectedPortalService from '../../services/connectedPortalService';
-import emergencyService from '../../services/emergencyService';
+import { sendSos } from '../../utils/sendSos';
 import aiCompanionService from '../../services/aiCompanionService';
 import vitalsEngine from '../../utils/vitalsSimulation';
 import { broadcastRealtimeEvent } from '../../utils/realtimeBus';
@@ -184,23 +184,20 @@ export default function ElderVitalsPage({ currentUser, onNavigateTab }) {
   }, [sosActive, sosSentConfirmed, sosCountdown]);
 
   const handleTriggerSOS = async () => {
-    try {
-      await emergencyService.triggerSOS();
-    } catch (err) {
-      console.warn('Emergency service SOS trigger fallback:', err);
-    }
-    try {
-      await connectedPortalService.triggerSOS({ lat: 37.7749, lng: -122.4194 });
-    } catch (err) {
-      console.warn('Connected portal SOS trigger fallback:', err);
+    const { delivered, location } = await sendSos();
+    if (!delivered) {
+      setSosActive(false);
+      setSosCountdown(10);
+      if (window.confirm('Your SOS could not be sent. Call 112 now?')) window.location.href = 'tel:112';
+      return;
     }
 
     broadcastRealtimeEvent('elderguard:realtime-event', {
       event: 'sos:triggered',
       type: 'sos',
       elder_name: currentUser?.name || 'Elder Patient',
-      location_lat: 37.7749,
-      location_lng: -122.4194,
+      location_lat: location.lat,
+      location_lng: location.lng,
       triggered_at: new Date().toISOString()
     });
 

@@ -1,3 +1,4 @@
+import TelegramConnectCard from '../../components/common/TelegramConnectCard';
 import React, { useEffect, useState } from 'react';
 import {
   Home,
@@ -90,6 +91,24 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
   const caregiverEldersQuery = useCaregiverElders(Boolean(currentUser?.id || currentUser?.user_id));
   const caregiverDashboardQuery = useCaregiverDashboard(currentElder?.id, currentElder?.id && currentElder.id !== 'unlinked');
   const connectedMutations = useConnectedMutations();
+  const [noticeDismissed, setNoticeDismissed] = useState(false);
+
+  // Badge reflects the real latest reading: no data, flagged by the server's range check, or in range.
+  const vitalBadge = (type) => {
+    const keyByType = { bp: 'bp', sugar: 'glucose', heart_rate: 'hr', spo2: 'spo2', weight: 'weight' };
+    if (!currentElder[keyByType[type]] || currentElder[keyByType[type]] === '--') {
+      return { label: 'No data', cls: 'bg-[#6B7280]/10 text-[#6B7280]' };
+    }
+    return currentElder.vitalFlags?.[type]
+      ? { label: 'Check', cls: 'bg-[#C1443A]/15 text-[#C1443A]' }
+      : { label: 'In range', cls: 'bg-[#1F8A5F]/15 text-[#1F8A5F]' };
+  };
+
+  const nextDose = (caregiverDashboardQuery.data?.today_medicines || []).find((m) => m.status !== 'taken');
+  const careNotice = [
+    currentElder.bp && currentElder.bp !== '--' ? `Latest blood pressure ${currentElder.bp} mmHg.` : null,
+    nextDose ? `Next dose: ${nextDose.name}${nextDose.dosage ? ` ${nextDose.dosage}` : ''}${nextDose.scheduled_times?.[0] ? ` at ${nextDose.scheduled_times[0]}` : ''}.` : null,
+  ].filter(Boolean).join(' ');
   useElderRoom(currentElder?.id, Boolean(currentElder?.id && currentElder.id !== 'unlinked'));
 
   useEffect(() => {
@@ -115,6 +134,7 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
         sleep: elder.latest_vitals?.find?.((v) => v.type === 'sleep')?.value?.value || '--',
         adherence: elder.adherence ?? 0, lastActive: elder.today_checkin ? 'Checked in today' : 'Connected',
         activeSos: elder.active_sos,
+        vitalFlags: (elder.latest_vitals || []).reduce((acc, v) => (v.type in acc ? acc : { ...acc, [v.type]: Boolean(v.flagged) }), {}),
         permissionLevel: elder.permission_level,
       }));
     setElders(mapped);
@@ -177,8 +197,8 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
           id: detail?.id || detail?.sos_event_id || 'sos-' + Date.now(),
           elder_name: detail?.elder_name || currentElder?.name || 'Connected elder',
           triggered_at: detail?.triggered_at || new Date().toISOString(),
-          location_lat: detail?.location_lat || 37.7749,
-          location_lng: detail?.location_lng || -122.4194,
+          location_lat: detail?.location_lat ?? null,
+          location_lng: detail?.location_lng ?? null,
           status: 'active'
         });
       } else if (detail?.event === 'sos:resolved') {
@@ -198,21 +218,25 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
   }, [sosEvents]);
 
   const handleAcknowledgeSos = async (eventId) => {
-    try {
-      await emergencyService.acknowledgeSOS(eventId);
-      fetchCaregiverAlerts();
-    } catch (err) {
-      console.warn('Failed to acknowledge SOS:', err);
-    }
+    const connectedSos = currentElder?.activeSos;
+    const results = await Promise.allSettled([
+      eventId ? emergencyService.acknowledgeSOS(eventId) : Promise.resolve(),
+      connectedSos?.id ? connectedPortalService.acknowledgeSOS(currentElder.id, connectedSos.id) : Promise.resolve(),
+    ]);
+    results.filter((r) => r.status === 'rejected').forEach((r) => console.warn('Failed to acknowledge SOS:', r.reason));
+    fetchCaregiverAlerts();
+    caregiverEldersQuery.refetch?.();
   };
 
   const handleResolveSos = async (eventId) => {
-    try {
-      await emergencyService.resolveSOS(eventId, 'Resolved by caregiver');
-      fetchCaregiverAlerts();
-    } catch (err) {
-      console.warn('Failed to resolve SOS:', err);
-    }
+    const connectedSos = currentElder?.activeSos;
+    const results = await Promise.allSettled([
+      eventId ? emergencyService.resolveSOS(eventId, 'Resolved by caregiver') : Promise.resolve(),
+      connectedSos?.id ? connectedPortalService.resolveSOS(currentElder.id, connectedSos.id, 'Resolved by caregiver') : Promise.resolve(),
+    ]);
+    results.filter((r) => r.status === 'rejected').forEach((r) => console.warn('Failed to resolve SOS:', r.reason));
+    fetchCaregiverAlerts();
+    caregiverEldersQuery.refetch?.();
   };
 
   // Caregiver Profile State
@@ -309,7 +333,13 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
       });
       setElderIdInput('');
       setShowConnectForm(false);
-      showToast(result?.status === 'active' ? 'Elder is connected to your care account.' : 'Unable to complete the connection.');
+      showToast(
+        result?.status === 'active'
+          ? 'Elder is connected to your care account.'
+          : result?.status === 'pending'
+            ? 'Invite sent. The elder must accept it before you can see their care data.'
+            : 'Unable to complete the connection.'
+      );
     } catch (error) {
       showToast(error.response?.data?.detail?.error?.message || error.response?.data?.detail || 'Unable to send this invite.');
     } finally {
@@ -687,6 +717,8 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
       {(effectiveTab === 'overview' || effectiveTab === 'home') && (
         <div className="space-y-6 animate-in fade-in duration-200">
           
+          <TelegramConnectCard />
+
           {/* Active Emergency SOS Alert Banner */}
           {sosEvents.some(s => String(s.status || 'active').toLowerCase() !== 'resolved') && (
             <div className="p-4 rounded-2xl bg-gradient-to-r from-[#C1443A] via-[#E53935] to-[#B71C1C] text-white border-2 border-white/40 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 shadow-xl">
@@ -721,7 +753,8 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
             </div>
           )}
 
-          {/* Critical Care Notice Banner */}
+          {/* Care notice built from the elder's real latest reading and next pending dose */}
+          {careNotice && !noticeDismissed && (
           <div className="p-4 rounded-2xl bg-gradient-to-r from-[#D4A24C]/15 via-[#FAF6ED] to-white border border-[#D4A24C]/40 flex items-center justify-between gap-4 shadow-sm">
             <div className="flex items-center gap-3.5">
               <div className="p-2.5 rounded-xl bg-[#D4A24C] text-[#0F1B2D] shadow-sm font-bold shrink-0">
@@ -729,18 +762,19 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
               </div>
               <div>
                 <h4 className="font-bold text-sm text-[#1A1D23] flex items-center gap-2">
-                  <span>Concierge Care Notice for {currentElder.name}</span>
-                  <span className="px-2 py-0.5 rounded bg-[#3B4C9E] text-white text-[10px] uppercase font-bold">Verified</span>
+                  <span>Care update for {currentElder.name}</span>
+                  <span className="px-2 py-0.5 rounded bg-[#3B4C9E] text-white text-[10px] uppercase font-bold">Live</span>
                 </h4>
                 <p className="text-xs text-[#525252] font-medium">
-                  Morning Blood Pressure logged at 128/80 mmHg (Optimal). Next Dose: Aspirin 81mg at 1:00 PM.
+                  {careNotice}
                 </p>
               </div>
             </div>
-            <button onClick={() => showToast('Notice acknowledged')} className="p-1.5 rounded-xl hover:bg-black/5 text-[#6B7280]">
+            <button onClick={() => setNoticeDismissed(true)} className="p-1.5 rounded-xl hover:bg-black/5 text-[#6B7280]" aria-label="Dismiss notice">
               <X className="w-4 h-4" />
             </button>
           </div>
+          )}
 
           {/* Live Vitals Summary Grid (5 Equal Width Sparkline Cards) */}
           <div>
@@ -749,7 +783,7 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
                 <Activity className="w-5 h-5 text-[#3B4C9E]" />
                 <span>Live Biosensor Vitals ({currentElder.name})</span>
               </h3>
-              <span className="text-xs text-[#6B7280] font-semibold">Synced {currentElder.lastActive}</span>
+              <span className="text-xs text-[#6B7280] font-semibold">{currentElder.lastActive}</span>
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
@@ -761,8 +795,8 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
                     <span className="flex items-center gap-1.5 text-[#C1443A] text-xs font-bold truncate">
                       <Heart className="w-4 h-4 shrink-0" /> BP
                     </span>
-                    <span className="px-2 py-0.5 rounded-full bg-[#1F8A5F]/15 text-[#1F8A5F] text-[10px] font-extrabold shrink-0 flex items-center gap-0.5">
-                      <TrendingDown className="w-3 h-3" /> Normal
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold shrink-0 flex items-center gap-0.5 ${vitalBadge('bp').cls}`}>
+                      <TrendingDown className="w-3 h-3" /> {vitalBadge('bp').label}
                     </span>
                   </div>
                   
@@ -789,8 +823,8 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
                     <span className="flex items-center gap-1.5 text-[#3B4C9E] text-xs font-bold truncate">
                       <Droplets className="w-4 h-4 shrink-0" /> Glucose
                     </span>
-                    <span className="px-2 py-0.5 rounded-full bg-[#1F8A5F]/15 text-[#1F8A5F] text-[10px] font-extrabold shrink-0">
-                      Optimal
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold shrink-0 ${vitalBadge('sugar').cls}`}>
+                      {vitalBadge('sugar').label}
                     </span>
                   </div>
 
@@ -798,7 +832,7 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
                     <div className="text-2xl font-black text-[#1A1D23] tracking-tight">
                       {currentElder.glucose} <span className="text-xs font-bold text-[#6B7280]">mg/dL</span>
                     </div>
-                    <div className="text-[11px] text-[#6B7280] font-medium truncate">Post-breakfast fast</div>
+                    <div className="text-[11px] text-[#6B7280] font-medium truncate">Blood sugar</div>
                   </div>
                 </div>
 
@@ -818,8 +852,8 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
                     <span className="flex items-center gap-1.5 text-[#1F8A5F] text-xs font-bold truncate">
                       <Activity className="w-4 h-4 shrink-0" /> Heart Rate
                     </span>
-                    <span className="px-2 py-0.5 rounded-full bg-[#1F8A5F]/15 text-[#1F8A5F] text-[10px] font-extrabold shrink-0">
-                      Calm
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold shrink-0 ${vitalBadge('heart_rate').cls}`}>
+                      {vitalBadge('heart_rate').label}
                     </span>
                   </div>
 
@@ -827,7 +861,7 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
                     <div className="text-2xl font-black text-[#1A1D23] tracking-tight">
                       {currentElder.hr} <span className="text-xs font-bold text-[#6B7280]">bpm</span>
                     </div>
-                    <div className="text-[11px] text-[#6B7280] font-medium truncate">Resting pulse rhythm</div>
+                    <div className="text-[11px] text-[#6B7280] font-medium truncate">Heart rate</div>
                   </div>
                 </div>
 
@@ -847,14 +881,14 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
                     <span className="flex items-center gap-1.5 text-[#D4A24C] text-xs font-bold truncate">
                       <Wind className="w-4 h-4 shrink-0" /> Oxygen
                     </span>
-                    <span className="px-2 py-0.5 rounded-full bg-[#1F8A5F]/15 text-[#1F8A5F] text-[10px] font-extrabold shrink-0">
-                      97% SpO2
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold shrink-0 ${vitalBadge('spo2').cls}`}>
+                      {vitalBadge('spo2').label}
                     </span>
                   </div>
 
                   <div>
                     <div className="text-2xl font-black text-[#1A1D23] tracking-tight">{currentElder.spo2}</div>
-                    <div className="text-[11px] text-[#6B7280] font-medium truncate">Optimal oxygenation</div>
+                    <div className="text-[11px] text-[#6B7280] font-medium truncate">Blood oxygen</div>
                   </div>
                 </div>
 
@@ -874,8 +908,8 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
                     <span className="flex items-center gap-1.5 text-[#3B4C9E] text-xs font-bold truncate">
                       <Scale className="w-4 h-4 shrink-0" /> Weight
                     </span>
-                    <span className="px-2 py-0.5 rounded-full bg-[#3B4C9E]/10 text-[#3B4C9E] text-[10px] font-extrabold shrink-0">
-                      Steady
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold shrink-0 ${vitalBadge('weight').cls}`}>
+                      {vitalBadge('weight').label}
                     </span>
                   </div>
 
@@ -883,7 +917,7 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
                     <div className="text-2xl font-black text-[#1A1D23] tracking-tight">
                       {currentElder.weight} <span className="text-xs font-bold text-[#6B7280]">kg</span>
                     </div>
-                    <div className="text-[11px] text-[#6B7280] font-medium truncate">Steady this month</div>
+                    <div className="text-[11px] text-[#6B7280] font-medium truncate">Latest weight</div>
                   </div>
                 </div>
 
@@ -2069,7 +2103,9 @@ export default function CaregiverDashboard({ currentUser, activeTab = 'overview'
                 <div className="p-3 rounded-xl bg-[#FAFBFC] border border-[#E5E9F0]">
                   <span className="text-[#6B7280] font-bold block mb-0.5">GPS Location</span>
                   <span className="font-mono font-bold text-[#3B4C9E]">
-                    {activeSosModalData.location_lat || '37.7749'}, {activeSosModalData.location_lng || '-122.4194'}
+                    {activeSosModalData.location_lat != null && activeSosModalData.location_lng != null
+                      ? `${activeSosModalData.location_lat}, ${activeSosModalData.location_lng}`
+                      : 'Not shared by the device'}
                   </span>
                 </div>
               </div>

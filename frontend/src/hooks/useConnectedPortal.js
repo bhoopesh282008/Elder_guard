@@ -10,6 +10,10 @@ const elderEvents = [
   'vital:logged',
   'sos:triggered',
   'sos:resolved',
+  'sos:acknowledged',
+  'sos:escalated',
+  'link:invited',
+  'link:accepted',
   'checkin:submitted',
   'appointment:booked',
   'appointment:updated',
@@ -30,6 +34,7 @@ export function useCaregiverElders(enabled = true) {
     queryKey: ['caregiver-elders'],
     queryFn: connectedPortalService.caregiverElders,
     enabled,
+    refetchInterval: 10000,
   });
 }
 
